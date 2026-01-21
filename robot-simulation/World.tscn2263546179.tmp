@@ -1,0 +1,75 @@
+[gd_scene load_steps=11 format=3 uid="uid://djejqpgpdvd6i"]
+
+[ext_resource type="PackedScene" uid="uid://cibstqxe3wqk" path="res://Robot.tscn" id="1_c6gwx"]
+[ext_resource type="Script" uid="uid://crku3v4n0nqn6" path="res://camera_pivot.gd" id="2_2dftf"]
+[ext_resource type="PackedScene" uid="uid://b6pgbu3m18jhv" path="res://obstacle_01.tscn" id="3_bcbcq"]
+
+[sub_resource type="Environment" id="Environment_c6gwx"]
+background_mode = 1
+background_color = Color(0.18729958, 0.23950979, 0.22568473, 1)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_c6gwx"]
+size = Vector3(20, 0.5, 20)
+
+[sub_resource type="BoxMesh" id="BoxMesh_2dftf"]
+size = Vector3(20, 0.5, 20)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_bcbcq"]
+albedo_color = Color(0.31939334, 0.2464666, 0.19039527, 1)
+
+[sub_resource type="Environment" id="Environment_cmany"]
+
+[sub_resource type="ORMMaterial3D" id="ORMMaterial3D_2dftf"]
+transparency = 1
+shading_mode = 0
+disable_ambient_light = true
+disable_fog = true
+disable_specular_occlusion = true
+albedo_color = Color(0.34479386, 0.50038445, 0.40998006, 1)
+
+[sub_resource type="SphereMesh" id="SphereMesh_bcbcq"]
+material = SubResource("ORMMaterial3D_2dftf")
+radius = 0.05
+height = 0.1
+
+[node name="Anchor" type="Node3D"]
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Environment_c6gwx")
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
+transform = Transform3D(-4.371139e-08, -0.9396926, 0.34202015, 0, 0.34202015, 0.9396926, -1, 4.1075268e-08, -1.4950176e-08, -0.21778822, 9.279791, 1.9073486e-06)
+light_specular = 0.0
+light_bake_mode = 1
+shadow_enabled = true
+
+[node name="Robot" parent="." instance=ExtResource("1_c6gwx")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.4750884, 0)
+
+[node name="StaticBody3D" type="StaticBody3D" parent="."]
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="StaticBody3D"]
+shape = SubResource("BoxShape3D_c6gwx")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="StaticBody3D/CollisionShape3D"]
+mesh = SubResource("BoxMesh_2dftf")
+skeleton = NodePath("../..")
+surface_material_override/0 = SubResource("StandardMaterial3D_bcbcq")
+
+[node name="CameraPivot" type="Node3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.0339363, 0)
+script = ExtResource("2_2dftf")
+
+[node name="SpringArm3D" type="SpringArm3D" parent="CameraPivot"]
+transform = Transform3D(1, 0, 0, 0, 0.70710677, 0.70710677, 0, -0.70710677, 0.70710677, 0, 0, 0)
+spring_length = 2.0
+
+[node name="Camera3D" type="Camera3D" parent="CameraPivot/SpringArm3D"]
+transform = Transform3D(1, 0, 0, 0, 0.9997105, 0.024065793, 0, -0.024065793, 0.9997105, 0, -0.9119494, 4.893596)
+environment = SubResource("Environment_cmany")
+
+[node name="Visualizer" type="MeshInstance3D" parent="CameraPivot"]
+mesh = SubResource("SphereMesh_bcbcq")
+
+[node name="Node3D" parent="." instance=ExtResource("3_bcbcq")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -6.9025826, 1.0943139, 0)
