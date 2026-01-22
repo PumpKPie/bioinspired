@@ -145,8 +145,12 @@ func draw_forward_ray():
 
 func _input(event):
 	if event is InputEventKey and event.pressed:
-		if event.keycode == KEY_R: clear_all_data()
-		if event.keycode == KEY_P: export_to_python()
+		if event.keycode == KEY_R: 
+			clear_all_data()
+		if event.keycode == KEY_P: 
+			# Saves locally AND sends to Python
+			save_to_local_txt()
+			export_to_python()
 
 func clear_all_data():
 	point_cloud.clear()
@@ -168,7 +172,31 @@ func handle_movement(delta):
 		velocity.x = move_toward(velocity.x, 0, SPEED)
 		velocity.z = move_toward(velocity.z, 0, SPEED)
 	move_and_slide()
+func save_to_local_txt():
+	if point_cloud.is_empty():
+		print("No points to save.")
+		return
 
+	# Determine the file path (saves in the project folder)
+	var file_path = "user://lidar_scan_" + str(Time.get_unix_time_from_system()) + ".txt"
+	var file = FileAccess.open(file_path, FileAccess.WRITE)
+	
+	if file:
+		# Write a header
+		file.store_line("# LIDAR Scan Export")
+		file.store_line("# Format: X Y Z Intensity")
+		
+		for i in range(point_cloud.size()):
+			var p = point_cloud[i]
+			var intensity = color_cloud[i].v
+			# Create a space-separated string
+			var line = "%f %f %f %f" % [p.x, p.y, p.z, intensity]
+			file.store_line(line)
+		
+		file.close()
+		print("LIDAR data saved to: ", ProjectSettings.globalize_path(file_path))
+	else:
+		print("Failed to open file for writing.")
 func export_to_python():
 	if is_connected_to_python:
 		var data = {"command": "save_to_txt", "points": []}
