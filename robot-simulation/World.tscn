@@ -1,8 +1,9 @@
-[gd_scene load_steps=11 format=3 uid="uid://djejqpgpdvd6i"]
+[gd_scene load_steps=12 format=3 uid="uid://djejqpgpdvd6i"]
 
 [ext_resource type="PackedScene" uid="uid://cibstqxe3wqk" path="res://Robot.tscn" id="1_c6gwx"]
 [ext_resource type="Script" uid="uid://crku3v4n0nqn6" path="res://camera_pivot.gd" id="2_2dftf"]
 [ext_resource type="PackedScene" uid="uid://b6pgbu3m18jhv" path="res://obstacle_01.tscn" id="3_bcbcq"]
+[ext_resource type="PackedScene" uid="uid://mfaxfiqbxn2o" path="res://forest-import.tscn" id="4_js7pq"]
 
 [sub_resource type="Environment" id="Environment_c6gwx"]
 background_mode = 1
@@ -56,6 +57,8 @@ mesh = SubResource("BoxMesh_2dftf")
 skeleton = NodePath("../..")
 surface_material_override/0 = SubResource("StandardMaterial3D_bcbcq")
 
+[node name="MultiMeshInstance3D" type="MultiMeshInstance3D" parent="StaticBody3D"]
+
 [node name="CameraPivot" type="Node3D" parent="."]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.0339363, 0)
 script = ExtResource("2_2dftf")
@@ -73,3 +76,6 @@ mesh = SubResource("SphereMesh_bcbcq")
 
 [node name="Node3D" parent="." instance=ExtResource("3_bcbcq")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -6.9025826, 1.0943139, 0)
+
+[node name="Forest" parent="." instance=ExtResource("4_js7pq")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 10.066265, 0, 9.238716)
