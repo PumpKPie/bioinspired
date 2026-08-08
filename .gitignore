@@ -12,6 +12,11 @@ export_credentials.cfg
 
 # Folder ignores
 Data/
+Venv/
+.venv/
+venv/
+__pycache__/
+*.pyc
 
 # Mono-specific ignores
 .mono/
