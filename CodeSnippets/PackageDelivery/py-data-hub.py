@@ -33,8 +33,7 @@ async def main_server():
 def start_network_server():
     asyncio.run(main_server())
 
-# --- 2. MAIN THREAD (Live 3D Rendering) ---
-# --- 2. MAIN THREAD (Live 3D Rendering) ---
+# --- 2. MAIN THREAD (Live 3D Rendering & Processing) ---
 def run_live_visualizer():
     print("[RENDER] Starting Live 3D Visualizer...")
     
@@ -48,7 +47,7 @@ def run_live_visualizer():
     vis.add_geometry(coord)
 
     accumulated_points = np.empty((0, 3))
-    camera_initialized = False # NEW: Track if we've focused the camera yet
+    camera_initialized = False 
 
     while True:
         new_data_available = False
@@ -58,16 +57,47 @@ def run_live_visualizer():
             new_data_available = True
             
         if new_data_available:
-            pcd.points = o3d.utility.Vector3dVector(accumulated_points)
-            pcd.paint_uniform_color([1.0, 0.9, 0.0]) 
+            # --- LIVE ROBOTIC PERCEPTION PIPELINE ---
+            
+            # 1. Load raw points into a temporary cloud
+            temp_pcd = o3d.geometry.PointCloud()
+            temp_pcd.points = o3d.utility.Vector3dVector(accumulated_points)
+            
+            # 2. Voxel Downsampling (Compresses the data so the live feed doesn't lag)
+            downpcd = temp_pcd.voxel_down_sample(voxel_size=0.15)
+            
+            # 3. RANSAC Ground Segmentation
+            # Only run if we have enough points to establish a mathematical floor plane
+            if len(downpcd.points) > 50:
+                # distance_threshold: How bumpy the forest floor is allowed to be (0.25 meters)
+                plane_model, inliers = downpcd.segment_plane(distance_threshold=0.25,
+                                                             ransac_n=3,
+                                                             num_iterations=200)
+                
+                # Separate ground and obstacles based on the RANSAC calculation
+                ground = downpcd.select_by_index(inliers)
+                obstacles = downpcd.select_by_index(inliers, invert=True)
+                
+                # Paint ground dirt-brown and obstacles bright green
+                ground.paint_uniform_color([0.5, 0.4, 0.3])
+                obstacles.paint_uniform_color([0.1, 0.8, 0.2])
+                
+                # Recombine into our main display object
+                points_combined = np.vstack((np.asarray(ground.points), np.asarray(obstacles.points)))
+                colors_combined = np.vstack((np.asarray(ground.colors), np.asarray(obstacles.colors)))
+                
+                pcd.points = o3d.utility.Vector3dVector(points_combined)
+                pcd.colors = o3d.utility.Vector3dVector(colors_combined)
+            else:
+                pcd.points = downpcd.points
+                pcd.paint_uniform_color([1.0, 0.9, 0.0])
             
             vis.update_geometry(pcd)
             
-            # NEW: Focus the camera exactly once, as soon as the first points arrive
             if not camera_initialized and len(accumulated_points) > 0:
                 vis.reset_view_point(True)
                 camera_initialized = True
-                print(f"[RENDER] Camera focused on {len(accumulated_points)} points.")
+                print(f"[RENDER] Camera focused. Live Processing active.")
 
         if not vis.poll_events():
             break 
