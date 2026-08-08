@@ -35,6 +35,10 @@ var current_h: float = 0.0
 var current_v: float = 0.0
 
 func _ready():
+	# Allow Godot to send up to 8 Megabytes of data at once
+	socket.inbound_buffer_size = 8 * 1024 * 1024
+	socket.outbound_buffer_size = 8 * 1024 * 1024
+	
 	setup_mesh_visualizer()
 	setup_debug_ray()
 	socket.connect_to_url(python_url)
@@ -60,17 +64,6 @@ func setup_debug_ray():
 	mat.albedo_color = Color.GREEN
 	look_line.material_override = mat
 	add_child(look_line) 
-
-func _physics_process(delta):
-	socket.poll()
-	is_connected_to_python = (socket.get_ready_state() == WebSocketPeer.STATE_OPEN)
-	
-	if not is_on_floor(): velocity.y -= gravity * delta
-	if Input.is_action_just_pressed("ui_accept") and is_on_floor(): velocity.y = JUMP_VELOCITY
-
-	handle_movement(delta)
-	run_intensity_sweep()
-	draw_forward_ray()
 
 func run_intensity_sweep():
 	if point_cloud.size() >= max_points: return
@@ -177,34 +170,88 @@ func save_to_local_txt():
 		print("No points to save.")
 		return
 
-	# Determine the file path (saves in the project folder)
-	var file_path = "user://lidar_scan_" + str(Time.get_unix_time_from_system()) + ".txt"
-	var file = FileAccess.open(file_path, FileAccess.WRITE)
+	# Points to 'bioinspired/Data/Point exports' relative to the Godot project root
+	var repo_root = ProjectSettings.globalize_path("res://..") 
+	var export_dir = repo_root.path_join("Data/PointExports")
 	
+	# Automatically create the folder structure if missing
+	if not DirAccess.dir_exists_absolute(export_dir):
+		DirAccess.make_dir_recursive_absolute(export_dir)
+
+	var filename = "lidar_scan_%d.txt" % int(Time.get_unix_time_from_system())
+	var full_path = export_dir.path_join(filename)
+
+	var file = FileAccess.open(full_path, FileAccess.WRITE)
 	if file:
-		# Write a header
 		file.store_line("# LIDAR Scan Export")
 		file.store_line("# Format: X Y Z Intensity")
-		
 		for i in range(point_cloud.size()):
 			var p = point_cloud[i]
-			var intensity = color_cloud[i].v
-			# Create a space-separated string
-			var line = "%f %f %f %f" % [p.x, p.y, p.z, intensity]
-			file.store_line(line)
-		
+			var intensity = color_cloud[i].v if i < color_cloud.size() else 1.0
+			file.store_line("%f %f %f %f" % [p.x, p.y, p.z, intensity])
 		file.close()
-		print("LIDAR data saved to: ", ProjectSettings.globalize_path(file_path))
+		print("Successfully saved scan to: ", full_path)
 	else:
-		print("Failed to open file for writing.")
+		print("Error: Could not open path for writing: ", full_path)
+func _physics_process(delta):
+	# --- WEBSOCKET CONNECTION & RECONNECT MANAGEMENT ---
+	socket.poll()
+	var state = socket.get_ready_state()
+	
+	if state == WebSocketPeer.STATE_OPEN:
+		if not is_connected_to_python:
+			print("[Godot] Successfully connected to Python WebSocket server!")
+			is_connected_to_python = true
+	elif state == WebSocketPeer.STATE_CLOSED:
+		if is_connected_to_python:
+			print("[Godot] Disconnected from Python. Retrying...")
+			is_connected_to_python = false
+		# Attempt auto-reconnect if server wasn't ready on boot
+		socket.connect_to_url(python_url)
+		# Attempt auto-reconnect if server wasn't ready on boot
+		socket.connect_to_url(python_url)
+		
+	# --- MOVEMENT & SCANNING ---
+	if not is_on_floor(): velocity.y -= gravity * delta
+	if Input.is_action_just_pressed("ui_accept") and is_on_floor(): velocity.y = JUMP_VELOCITY
+
+	handle_movement(delta)
+	run_intensity_sweep()
+	draw_forward_ray()
+
 func export_to_python():
-	if is_connected_to_python:
-		var data = {"command": "save_to_txt", "points": []}
-		for i in range(point_cloud.size()):
+	if not is_connected_to_python:
+		print("[Godot] Cannot send data: WebSocket is NOT connected to Python.")
+		return
+
+	if point_cloud.is_empty():
+		print("[Godot] No points to send.")
+		return
+
+	print("[Godot] Streaming %d points to Python..." % point_cloud.size())
+	
+	# CHUNKING LOGIC: Send in 2,000-point batches to prevent socket buffer overflow
+	var batch_size = 2000
+	var total_points = point_cloud.size()
+	
+	for start_idx in range(0, total_points, batch_size):
+		var end_idx = min(start_idx + batch_size, total_points)
+		var batch_points = []
+		
+		for i in range(start_idx, end_idx):
 			var p = point_cloud[i]
-			var c = color_cloud[i]
-			data["points"].append({
-				"x": p.x, "y": p.y, "z": p.z,
-				"intensity": c.v # Exporting brightness as 'intensity'
+			var c = color_cloud[i] if i < color_cloud.size() else Color.WHITE
+			batch_points.append({
+				"x": p.x, 
+				"y": p.y, 
+				"z": p.z,
+				"intensity": c.v
 			})
-		socket.send_text(JSON.stringify(data))
+		
+		var payload = {
+			"command": "lidar_batch",
+			"points": batch_points
+		}
+		socket.send_text(JSON.stringify(payload))
+		
+	print("[Godot] Successfully finished sending all batches to Python.")
