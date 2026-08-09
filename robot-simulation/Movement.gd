@@ -221,17 +221,15 @@ func _physics_process(delta):
 
 func export_to_python():
 	if not is_connected_to_python:
-		print("[Godot] Cannot send data: WebSocket is NOT connected to Python.")
+		print("[Godot] Cannot send data: WebSocket is NOT connected.")
 		return
 
 	if point_cloud.is_empty():
-		print("[Godot] No points to send.")
 		return
 
-	print("[Godot] Streaming %d points to Python..." % point_cloud.size())
-	
-	# CHUNKING LOGIC: Send in 2,000-point batches to prevent socket buffer overflow
-	var batch_size = 2000
+	# Grab the exact coordinates of the robot's body
+	var origin = global_position
+	var batch_size = 500 
 	var total_points = point_cloud.size()
 	
 	for start_idx in range(0, total_points, batch_size):
@@ -240,18 +238,14 @@ func export_to_python():
 		
 		for i in range(start_idx, end_idx):
 			var p = point_cloud[i]
-			var c = color_cloud[i] if i < color_cloud.size() else Color.WHITE
-			batch_points.append({
-				"x": p.x, 
-				"y": p.y, 
-				"z": p.z,
-				"intensity": c.v
-			})
+			batch_points.append({"x": p.x, "y": p.y, "z": p.z})
 		
-		var payload = {
-			"command": "lidar_batch",
-			"points": batch_points
-		}
-		socket.send_text(JSON.stringify(payload))
+		socket.send_text(JSON.stringify({"command": "lidar_batch", "points": batch_points}))
 		
-	print("[Godot] Successfully finished sending all batches to Python.")
+	# NEW: Send the completion packet AND the robot's coordinates!
+	var complete_payload = {
+		"command": "scan_complete",
+		"sensor_origin": {"x": origin.x, "y": origin.y, "z": origin.z}
+	}
+	socket.send_text(JSON.stringify(complete_payload))
+	print("[Godot] Finished sending scan and sensor origin.")
