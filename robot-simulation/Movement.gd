@@ -3,7 +3,6 @@ extends CharacterBody3D
 @export var sensor_hub: RayCast3D 
 @onready var camera = get_viewport().get_camera_3d()
 
-# --- MOVEMENT CONSTANTS ---
 const SPEED = 5.0
 const JUMP_VELOCITY = 4.5
 var gravity = ProjectSettings.get_setting("physics/3d/default_gravity")
@@ -13,12 +12,12 @@ var gravity = ProjectSettings.get_setting("physics/3d/default_gravity")
 
 func _ready():
 	if not sensor_hub:
-		push_error("SensorHub not linked! Drag the RayCast3D node into the Movement script's Inspector.")
+		push_error("SensorHub not linked!")
 	else:
 		sensor_hub.map_data_received.connect(_on_map_data_received)
 
 func _on_map_data_received(costmap_data):
-	print("[Movement] Received costmap for navigation!")
+	pass
 
 func _input(event):
 	if event is InputEventKey and event.pressed:
@@ -26,10 +25,11 @@ func _input(event):
 			sensor_hub.clear_all_data()
 		if event.keycode == KEY_P and sensor_hub: 
 			sensor_hub.save_to_local_txt()
-			# Pass the robot's actual position so Python knows where we are!
 			sensor_hub.export_to_python(global_position)
+		# Toggle Visualizer Mode (Points -> Geometry -> Hybrid)
+		if event.keycode == KEY_V and sensor_hub:
+			sensor_hub.cycle_vis_mode()
 
-# RESTORED: Your original flawless movement logic
 func handle_movement(delta):
 	var input_dir = Input.get_vector("ui_left", "ui_right", "ui_up", "ui_down")
 	var cam_basis = camera.global_transform.basis
@@ -53,6 +53,5 @@ func _physics_process(delta):
 	handle_movement(delta)
 	
 	if sensor_hub:
-		# Pass the whole robot body to the sensor so it can shoot lasers from our exact location
 		sensor_hub.run_intensity_sweep(self)
 		sensor_hub.draw_forward_ray(self)

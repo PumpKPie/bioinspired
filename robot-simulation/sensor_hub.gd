@@ -26,11 +26,11 @@ var look_line: MeshInstance3D
 var occupied_voxels = {} 
 var current_h: float = 0.0
 var current_v: float = 0.0
+var vis_mode: int = 1 # 0: Points Only, 1: Geometry Only (Default), 2: Hybrid
 
 func _ready():
 	socket.inbound_buffer_size = 8 * 1024 * 1024
 	socket.outbound_buffer_size = 8 * 1024 * 1024
-	
 	setup_mesh_visualizer()
 	setup_debug_ray()
 	socket.connect_to_url(python_url)
@@ -38,41 +38,37 @@ func _ready():
 func _process(delta):
 	socket.poll()
 	var state = socket.get_ready_state()
-	
 	if state == WebSocketPeer.STATE_OPEN:
 		if not is_connected_to_python:
-			print("[Godot] Successfully connected to Python!")
+			print("[Godot] Connected to Python Brain.")
 			is_connected_to_python = true
-			
 		while socket.get_available_packet_count():
 			var packet = socket.get_packet().get_string_from_utf8()
 			var data = JSON.parse_string(packet)
 			if data and data.has("command") and data["command"] == "update_costmap":
 				emit_signal("map_data_received", data["costmap"])
-				
 	elif state == WebSocketPeer.STATE_CLOSED:
 		if is_connected_to_python:
-			print("[Godot] Disconnected from Python. Retrying...")
 			is_connected_to_python = false
 		socket.connect_to_url(python_url)
 
-# Accepts the origin passed from Movement.gd
-func export_to_python(origin: Vector3):
-	if not is_connected_to_python:
-		print("[Godot] Cannot send data: WebSocket is NOT connected.")
-		return
-	if point_cloud.is_empty():
-		return
+func cycle_vis_mode():
+	vis_mode = (vis_mode + 1) % 3
+	var modes = ["Points Only", "Geometry Only (Default)", "Hybrid (Points + Geometry)"]
+	print("[Godot] Visualizer mode set to: ", modes[vis_mode])
+	if socket.get_ready_state() == WebSocketPeer.STATE_OPEN:
+		socket.send_text(JSON.stringify({"command": "set_vis_mode", "mode": vis_mode}))
 
-	var byte_buffer: PackedByteArray = point_cloud.to_byte_array()
-	socket.put_packet(byte_buffer)
-	
-	var complete_payload = {
+func export_to_python(origin: Vector3):
+	if not is_connected_to_python or point_cloud.is_empty():
+		return
+	socket.put_packet(point_cloud.to_byte_array())
+	var meta = {
 		"command": "scan_complete",
-		"sensor_origin": {"x": origin.x, "y": origin.y, "z": origin.z}
+		"sensor_origin": {"x": origin.x, "y": origin.y, "z": origin.z},
+		"vis_mode": vis_mode
 	}
-	socket.send_text(JSON.stringify(complete_payload))
-	print("[Godot] Binary point cloud exported.")
+	socket.send_text(JSON.stringify(meta))
 
 func setup_mesh_visualizer():
 	mesh_instance = MeshInstance3D.new()
@@ -89,14 +85,13 @@ func setup_mesh_visualizer():
 func setup_debug_ray():
 	look_line = MeshInstance3D.new()
 	look_line.mesh = ImmediateMesh.new()
-	look_line.top_level = true # Forces the green ray to detach from the static spawn point
+	look_line.top_level = true
 	var mat = ORMMaterial3D.new()
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	mat.albedo_color = Color.GREEN
 	look_line.material_override = mat
 	add_child(look_line) 
 
-# Math updated to shoot from the body's global_position
 func run_intensity_sweep(body: CharacterBody3D):
 	if point_cloud.size() >= max_points: return
 	var space_state = get_world_3d().direct_space_state
@@ -152,17 +147,13 @@ func update_mesh():
 	arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_POINTS, arrays)
 	mesh_instance.mesh = arr_mesh
 
-# Draws using the absolute world coordinates of the robot
 func draw_forward_ray(body: CharacterBody3D):
 	var imm: ImmediateMesh = look_line.mesh
 	imm.clear_surfaces()
 	imm.surface_begin(Mesh.PRIMITIVE_LINES)
 	imm.surface_add_vertex(body.global_position)
-	
-	# Calculate exactly 2 units in front of the robot's current rotation
 	var forward_endpoint = body.global_position + (body.global_transform.basis * (Vector3.FORWARD * -2.0))
 	imm.surface_add_vertex(forward_endpoint) 
-	
 	imm.surface_end()
 
 func clear_all_data():
