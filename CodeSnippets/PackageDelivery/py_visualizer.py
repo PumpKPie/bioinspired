@@ -13,7 +13,7 @@ zmq_config_pub.connect("tcp://127.0.0.1:5556")
 print("[RENDER] Starting Digital Twin Visualizer...")
 
 vis = o3d.visualization.VisualizerWithKeyCallback()
-vis.create_window(window_name="Digital Twin: Interactive Tuner", width=1280, height=720)
+vis.create_window(window_name="Digital Twin: Persistent Chunked Visualizer", width=1280, height=720)
 
 render_opt = vis.get_render_option()
 render_opt.mesh_show_back_face = True
@@ -22,6 +22,7 @@ COLOR_TRUNK   = [0.212, 0.082, 0.078] # #361514
 COLOR_CANOPY  = [0.184, 0.302, 0.251] # #2f4d40
 COLOR_RUBBLE  = [0.267, 0.290, 0.310] # #444a4f
 COLOR_FLOOR   = [0.450, 0.360, 0.260] # Ground
+COLOR_CYAN    = [0.000, 1.000, 1.000] # #00FFFF Active Chunk Wireframe
 
 COLOR_POINTS_ALONE  = [0.90, 0.70, 0.10]
 COLOR_POINTS_HYBRID = [0.45, 0.35, 0.05]
@@ -33,11 +34,11 @@ vis.add_geometry(pcd_vis)
 vis.add_geometry(floor_mesh_vis)
 
 active_geom_meshes = []
+active_chunk_line_sets = []
 camera_init = False
 current_vis_mode = 1
 last_payload = None
 
-# New Defaults
 curr_alpha = 1.00
 curr_max_gap = 2.00
 show_legend = True
@@ -58,11 +59,13 @@ def print_legend():
     print("  • '[' / ']' : Decrease / Increase Alpha (±0.05m)")
     print("  • '-' / '=' : Decrease / Increase Cluster Gap (±0.05m)")
     print("  • 'H'       : Toggle this Help & Parameters HUD")
+    print("  • 'C'       : Toggle Continuous SLAM [Godot]")
     print("  • 'V'       : Cycle Vis Mode (Points -> Mesh -> Hybrid) [Godot]")
-    print("  • 'P'       : Trigger LiDAR Scan [Godot]")
-    print("  • 'R'       : Reset / Clear Scan Data [Godot]")
+    print("  • 'P'       : Manual Scan Burst [Godot]")
+    print("  • 'R'       : Reset Map & Clear Data [Godot]")
     print("-" * 58)
     print(" [COLOR PALETTE]")
+    print("  • Cyan Box : #00FFFF (Active Loaded Minecraft Chunks)")
     print("  • Trunks   : #361514 (Deep Wood Brown)")
     print("  • Canopies : #2f4d40 (Foliage Green)")
     print("  • Rubble   : #444a4f (Structure Slate Gray)")
@@ -118,6 +121,11 @@ def clear_geometry_meshes():
         vis.remove_geometry(m, reset_bounding_box=False)
     active_geom_meshes.clear()
 
+def clear_chunk_boxes():
+    for ls in active_chunk_line_sets:
+        vis.remove_geometry(ls, reset_bounding_box=False)
+    active_chunk_line_sets.clear()
+
 def make_mesh_from_dict(mesh_dict, color):
     mesh = o3d.geometry.TriangleMesh()
     mesh.vertices = o3d.utility.Vector3dVector(np.array(mesh_dict["vertices"]))
@@ -126,9 +134,19 @@ def make_mesh_from_dict(mesh_dict, color):
     mesh.paint_uniform_color(color)
     return mesh
 
+def make_chunk_bounding_box(box_dict):
+    bbox = o3d.geometry.AxisAlignedBoundingBox(
+        min_bound=np.array(box_dict["min"]),
+        max_bound=np.array(box_dict["max"])
+    )
+    line_set = o3d.geometry.LineSet.create_from_axis_aligned_bounding_box(bbox)
+    line_set.paint_uniform_color(COLOR_CYAN)
+    return line_set
+
 def render_scene(data, mode):
     global camera_init
     clear_geometry_meshes()
+    clear_chunk_boxes()
     opt = vis.get_render_option()
 
     if mode == 2:
@@ -145,6 +163,9 @@ def render_scene(data, mode):
             pcd_vis.points = o3d.utility.Vector3dVector(raw_pts)
             pt_color = COLOR_POINTS_HYBRID if mode == 2 else COLOR_POINTS_ALONE
             pcd_vis.paint_uniform_color(pt_color)
+            vis.update_geometry(pcd_vis)
+        else:
+            pcd_vis.points = o3d.utility.Vector3dVector([])
             vis.update_geometry(pcd_vis)
     else:
         pcd_vis.points = o3d.utility.Vector3dVector([])
@@ -183,6 +204,12 @@ def render_scene(data, mode):
         floor_mesh_vis.triangles = o3d.utility.Vector3iVector([])
         vis.update_geometry(floor_mesh_vis)
 
+    # 3. Cyan Active Minecraft Chunk Wireframes
+    for b in data.get("active_chunks", []):
+        ls = make_chunk_bounding_box(b)
+        active_chunk_line_sets.append(ls)
+        vis.add_geometry(ls, reset_bounding_box=False)
+
     if not camera_init:
         vis.reset_view_point(True)
         camera_init = True
@@ -196,10 +223,22 @@ while True:
                 print_legend()
             if last_payload is not None:
                 render_scene(last_payload, current_vis_mode)
+                
+        elif data.get("type") == "reset_map":
+            last_payload = None
+            clear_geometry_meshes()
+            clear_chunk_boxes()
+            pcd_vis.points = o3d.utility.Vector3dVector([])
+            floor_mesh_vis.vertices = o3d.utility.Vector3dVector([])
+            floor_mesh_vis.triangles = o3d.utility.Vector3iVector([])
+            vis.update_geometry(pcd_vis)
+            vis.update_geometry(floor_mesh_vis)
+            
         elif data.get("type") == "map_update":
             last_payload = data
             current_vis_mode = data.get("vis_mode", current_vis_mode)
             render_scene(last_payload, current_vis_mode)
+            
     except zmq.Again:
         pass
 

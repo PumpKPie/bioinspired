@@ -7,7 +7,7 @@ signal map_data_received(costmap_data)
 @export var python_url = "ws://localhost:8080"
 
 @export_group("LIDAR Config")
-@export var max_points: int = 100000    
+@export var max_active_points: int = 15000
 @export var lidar_range: float = 25.0
 @export var total_v_fov: float = 45.0  
 @export var h_resolution: float = 1.0   
@@ -26,11 +26,16 @@ var look_line: MeshInstance3D
 var occupied_voxels = {} 
 var current_h: float = 0.0
 var current_v: float = 0.0
-var vis_mode: int = 1 # 0: Points Only, 1: Geometry Only (Default), 2: Hybrid
+var vis_mode: int = 1
+
+var continuous_streaming: bool = false
+var stream_interval: float = 0.1
+var stream_timer: float = 0.0
+var streaming_world_buffer := PackedVector3Array()
 
 func _ready():
-	socket.inbound_buffer_size = 8 * 1024 * 1024
-	socket.outbound_buffer_size = 8 * 1024 * 1024
+	socket.inbound_buffer_size = 16 * 1024 * 1024
+	socket.outbound_buffer_size = 16 * 1024 * 1024
 	setup_mesh_visualizer()
 	setup_debug_ray()
 	socket.connect_to_url(python_url)
@@ -40,7 +45,7 @@ func _process(delta):
 	var state = socket.get_ready_state()
 	if state == WebSocketPeer.STATE_OPEN:
 		if not is_connected_to_python:
-			print("[Godot] Connected to Python Brain.")
+			print("[Godot] Chunked SLAM stream connected.")
 			is_connected_to_python = true
 		while socket.get_available_packet_count():
 			var packet = socket.get_packet().get_string_from_utf8()
@@ -52,23 +57,39 @@ func _process(delta):
 			is_connected_to_python = false
 		socket.connect_to_url(python_url)
 
+func toggle_continuous_stream():
+	continuous_streaming = not continuous_streaming
+	print("[Godot] Continuous Real-Time Streaming: ", "ENABLED" if continuous_streaming else "DISABLED")
+
 func cycle_vis_mode():
 	vis_mode = (vis_mode + 1) % 3
-	var modes = ["Points Only", "Geometry Only (Default)", "Hybrid (Points + Geometry)"]
-	print("[Godot] Visualizer mode set to: ", modes[vis_mode])
 	if socket.get_ready_state() == WebSocketPeer.STATE_OPEN:
 		socket.send_text(JSON.stringify({"command": "set_vis_mode", "mode": vis_mode}))
 
-func export_to_python(origin: Vector3):
+# Sends robot global position in 12 bytes + raw world points
+func _pack_stream_packet(robot_pos: Vector3, world_points: PackedVector3Array) -> PackedByteArray:
+	var pos_bytes = PackedFloat32Array([robot_pos.x, robot_pos.y, robot_pos.z]).to_byte_array()
+	return pos_bytes + world_points.to_byte_array()
+
+func process_streaming(robot_transform: Transform3D):
+	if not continuous_streaming or not is_connected_to_python:
+		return
+		
+	stream_timer += get_physics_process_delta_time()
+	if stream_timer >= stream_interval:
+		stream_timer = 0.0
+		if streaming_world_buffer.size() >= 10:
+			var packet = _pack_stream_packet(robot_transform.origin, streaming_world_buffer)
+			socket.put_packet(packet)
+			streaming_world_buffer.clear()
+
+func export_single_scan(robot_transform: Transform3D):
 	if not is_connected_to_python or point_cloud.is_empty():
 		return
-	socket.put_packet(point_cloud.to_byte_array())
-	var meta = {
-		"command": "scan_complete",
-		"sensor_origin": {"x": origin.x, "y": origin.y, "z": origin.z},
-		"vis_mode": vis_mode
-	}
-	socket.send_text(JSON.stringify(meta))
+	var packet = _pack_stream_packet(robot_transform.origin, point_cloud)
+	socket.put_packet(packet)
+	socket.send_text(JSON.stringify({"command": "force_reconstruct"}))
+	print("[Godot] Manual scan burst sent.")
 
 func setup_mesh_visualizer():
 	mesh_instance = MeshInstance3D.new()
@@ -93,7 +114,6 @@ func setup_debug_ray():
 	add_child(look_line) 
 
 func run_intensity_sweep(body: CharacterBody3D):
-	if point_cloud.size() >= max_points: return
 	var space_state = get_world_3d().direct_space_state
 	var added = false
 	var v_half = total_v_fov / 2.0
@@ -117,10 +137,14 @@ func run_intensity_sweep(body: CharacterBody3D):
 				pt_color.v *= intensity 
 				pt_color.a = clamp(intensity + 0.2, 0.1, 0.8) 
 				
+				if point_cloud.size() >= max_active_points:
+					point_cloud.remove_at(0)
+					color_cloud.remove_at(0)
+				
 				point_cloud.append(result.position)
+				streaming_world_buffer.append(result.position)
 				color_cloud.append(pt_color)
 				added = true
-				if point_cloud.size() >= max_points: break
 		
 		current_v += v_resolution
 		if current_v > v_half:
@@ -158,9 +182,13 @@ func draw_forward_ray(body: CharacterBody3D):
 
 func clear_all_data():
 	point_cloud.clear()
+	streaming_world_buffer.clear()
 	color_cloud.clear()
 	occupied_voxels.clear()
 	update_mesh()
+	if socket.get_ready_state() == WebSocketPeer.STATE_OPEN:
+		socket.send_text(JSON.stringify({"command": "reset_map"}))
+	print("[Godot] Local points and remote chunks cleared.")
 
 func save_to_local_txt():
 	pass

@@ -25,10 +25,12 @@ func _input(event):
 			sensor_hub.clear_all_data()
 		if event.keycode == KEY_P and sensor_hub: 
 			sensor_hub.save_to_local_txt()
-			sensor_hub.export_to_python(global_position)
-		# Toggle Visualizer Mode (Points -> Geometry -> Hybrid)
+			sensor_hub.export_single_scan(global_transform)
 		if event.keycode == KEY_V and sensor_hub:
 			sensor_hub.cycle_vis_mode()
+		# Toggle Continuous Streaming Mode
+		if event.keycode == KEY_C and sensor_hub:
+			sensor_hub.toggle_continuous_stream()
 
 func handle_movement(delta):
 	var input_dir = Input.get_vector("ui_left", "ui_right", "ui_up", "ui_down")
@@ -55,3 +57,5 @@ func _physics_process(delta):
 	if sensor_hub:
 		sensor_hub.run_intensity_sweep(self)
 		sensor_hub.draw_forward_ray(self)
+		# Flush point buffers continuously during movement
+		sensor_hub.process_streaming(global_transform)
