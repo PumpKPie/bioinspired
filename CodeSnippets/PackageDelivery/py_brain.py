@@ -6,9 +6,15 @@ import open3d as o3d
 import zmq
 from scipy.spatial import Delaunay
 
+# --- ZMQ SETUP (Two-way communication) ---
 context = zmq.Context()
 zmq_publisher = context.socket(zmq.PUB)
 zmq_publisher.bind("tcp://127.0.0.1:5555")
+
+zmq_config_sub = context.socket(zmq.SUB)
+zmq_config_sub.bind("tcp://127.0.0.1:5556")
+zmq_config_sub.setsockopt_string(zmq.SUBSCRIBE, "")
+
 
 class EnvironmentMapper:
     def __init__(self, voxel_size=0.15):
@@ -133,9 +139,10 @@ class TerrainReconstructor:
 
 
 class GeometryClassifier:
-    def __init__(self, n_sides=8, max_closure_distance=0.45):
+    def __init__(self, n_sides=8, alpha=1.0, max_closure_distance=2.0):
         self.n_sides = n_sides
-        self.max_closure_distance = max_closure_distance  # Threshold to close or leave open
+        self.alpha = alpha
+        self.max_closure_distance = max_closure_distance
 
     def _is_sharp_or_box(self, normals):
         if len(normals) < 10:
@@ -145,7 +152,7 @@ class GeometryClassifier:
         cardinal_aligned = (abs_nx > 0.85) | (abs_nz > 0.85)
         return (np.count_nonzero(cardinal_aligned) / len(normals)) > 0.65
 
-    def _build_lofted_trunk_mesh(self, cluster_pts, trunk_y_max, slice_h=0.3):
+    def _build_lofted_trunk_mesh(self, cluster_pts, trunk_y_max, slice_h=0.35):
         min_y = cluster_pts[:, 1].min()
         rings = []
         current_y = min_y
@@ -201,8 +208,7 @@ class GeometryClassifier:
 
         return {"vertices": vertices, "triangles": triangles}
 
-    def _reconstruct_distance_bounded_surface(self, points, alpha=0.35):
-        """Builds mesh that stays open across unscanned gaps and only closes within threshold."""
+    def _reconstruct_distance_bounded_surface(self, points):
         if len(points) < 4:
             return None
             
@@ -210,7 +216,7 @@ class GeometryClassifier:
         pcd.points = o3d.utility.Vector3dVector(points)
         
         try:
-            mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_alpha_shape(pcd, alpha=alpha)
+            mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_alpha_shape(pcd, alpha=self.alpha)
             mesh.remove_duplicated_vertices()
             mesh.remove_degenerate_triangles()
             
@@ -219,7 +225,6 @@ class GeometryClassifier:
             if len(tri) == 0 or len(v) == 0:
                 return None
                 
-            # Distance threshold: prune any triangle exceeding closure distance
             e0 = np.linalg.norm(v[tri[:, 0]] - v[tri[:, 1]], axis=1)
             e1 = np.linalg.norm(v[tri[:, 1]] - v[tri[:, 2]], axis=1)
             e2 = np.linalg.norm(v[tri[:, 2]] - v[tri[:, 0]], axis=1)
@@ -244,16 +249,16 @@ class GeometryClassifier:
     def _reconstruct_foliage_subclusters(self, points):
         foliage_pcd = o3d.geometry.PointCloud()
         foliage_pcd.points = o3d.utility.Vector3dVector(points)
-        sub_labels = np.array(foliage_pcd.cluster_dbscan(eps=0.30, min_points=6, print_progress=False))
+        sub_labels = np.array(foliage_pcd.cluster_dbscan(eps=0.55, min_points=5, print_progress=False))
         meshes = []
 
         for j in range(sub_labels.max() + 1):
             sub_idx = np.where(sub_labels == j)[0]
             sub_pts = points[sub_idx]
-            if len(sub_pts) < 6:
+            if len(sub_pts) < 4:
                 continue
 
-            mesh_data = self._reconstruct_distance_bounded_surface(sub_pts, alpha=0.35)
+            mesh_data = self._reconstruct_distance_bounded_surface(sub_pts)
             if mesh_data is not None:
                 meshes.append(mesh_data)
 
@@ -268,7 +273,7 @@ class GeometryClassifier:
         floor_pts = np.asarray(floor_pcd.points)
         floor_level = np.median(floor_pts[:, 1]) if len(floor_pts) > 0 else 0.0
 
-        labels = np.array(obstacle_pcd.cluster_dbscan(eps=0.45, min_points=8, print_progress=False))
+        labels = np.array(obstacle_pcd.cluster_dbscan(eps=0.55, min_points=6, print_progress=False))
         
         trunk_meshes = []
         canopy_meshes = []
@@ -279,7 +284,7 @@ class GeometryClassifier:
             cluster_pts = points[idx]
             cluster_norms = normals[idx] if len(normals) == len(points) else np.zeros_like(cluster_pts)
             
-            if len(cluster_pts) < 8:
+            if len(cluster_pts) < 6:
                 continue
 
             min_b = cluster_pts.min(axis=0)
@@ -288,27 +293,24 @@ class GeometryClassifier:
             width = max_b[0] - min_b[0]
             depth = max_b[2] - min_b[2]
             
-            # 1. Floating Obstacles -> Foliage
             if (min_b[1] - floor_level) > 0.8:
                 canopy_meshes.extend(self._reconstruct_foliage_subclusters(cluster_pts))
                 continue
 
-            # 2. Ground-Connected Trees
             is_sharp_cube = self._is_sharp_or_box(cluster_norms)
             is_tree = (height >= 1.4) and (width < 1.8) and (depth < 1.8) and (not is_sharp_cube)
 
             if is_tree:
-                trunk_y_max = min_b[1] + (height * 0.6)
+                trunk_y_max = min_b[1] + (height * 0.55)
                 trunk_mesh_data = self._build_lofted_trunk_mesh(cluster_pts, trunk_y_max)
                 if trunk_mesh_data:
                     trunk_meshes.append(trunk_mesh_data)
 
                 canopy_pts = cluster_pts[cluster_pts[:, 1] > trunk_y_max]
-                if len(canopy_pts) >= 6:
+                if len(canopy_pts) >= 4:
                     canopy_meshes.extend(self._reconstruct_foliage_subclusters(canopy_pts))
             else:
-                # 3. Rubble / Manmade Structures (Distance-bounded: open until completed)
-                rubble_mesh_data = self._reconstruct_distance_bounded_surface(cluster_pts, alpha=0.40)
+                rubble_mesh_data = self._reconstruct_distance_bounded_surface(cluster_pts)
                 if rubble_mesh_data is not None:
                     rubble_meshes.append(rubble_mesh_data)
 
@@ -317,13 +319,44 @@ class GeometryClassifier:
 
 mapper = EnvironmentMapper(voxel_size=0.15)
 terrain_builder = TerrainReconstructor(elevation_threshold=0.05, max_triangle_edge=1.1)
-classifier = GeometryClassifier(n_sides=8, max_closure_distance=0.45)
+classifier = GeometryClassifier(n_sides=8, alpha=1.0, max_closure_distance=2.0)
 
 binary_buffer = None
 current_vis_mode = 1
+last_obs_pcd = None
+last_floor_pcd = None
+
+def broadcast_scene():
+    if last_floor_pcd is not None and last_obs_pcd is not None:
+        trunks, canopies, rubble = classifier.classify_scene(last_obs_pcd, last_floor_pcd)
+        ground_mesh = terrain_builder.reconstruct_ground(last_floor_pcd)
+
+        display_payload = {
+            "type": "map_update",
+            "vis_mode": current_vis_mode,
+            "raw_points": np.asarray(mapper.global_pcd.points),
+            "floor_mesh": ground_mesh,
+            "trunks": trunks,
+            "canopies": canopies,
+            "rubble": rubble
+        }
+        zmq_publisher.send_pyobj(display_payload)
+
+async def check_config_updates():
+    while True:
+        try:
+            cfg = zmq_config_sub.recv_pyobj(flags=zmq.NOBLOCK)
+            if "alpha" in cfg:
+                classifier.alpha = cfg["alpha"]
+            if "max_closure" in cfg:
+                classifier.max_closure_distance = cfg["max_closure"]
+            broadcast_scene()
+        except zmq.Again:
+            pass
+        await asyncio.sleep(0.05)
 
 async def listen_to_godot(websocket):
-    global binary_buffer, current_vis_mode
+    global binary_buffer, current_vis_mode, last_floor_pcd, last_obs_pcd
     print("[BRAIN] Godot connected.")
     try:
         async for message in websocket:
@@ -338,28 +371,15 @@ async def listen_to_godot(websocket):
                 elif data.get("command") == "scan_complete" and binary_buffer is not None:
                     current_vis_mode = data.get("vis_mode", current_vis_mode)
                     mapper.process_new_scan(binary_buffer)
-                    floor_pcd, obs_pcd = mapper.extract_context()
-
-                    if floor_pcd is not None:
-                        trunks, canopies, rubble = classifier.classify_scene(obs_pcd, floor_pcd)
-                        ground_mesh = terrain_builder.reconstruct_ground(floor_pcd)
-
-                        display_payload = {
-                            "type": "map_update",
-                            "vis_mode": current_vis_mode,
-                            "raw_points": np.asarray(mapper.global_pcd.points),
-                            "floor_mesh": ground_mesh,
-                            "trunks": trunks,
-                            "canopies": canopies,
-                            "rubble": rubble
-                        }
-                        zmq_publisher.send_pyobj(display_payload)
+                    last_floor_pcd, last_obs_pcd = mapper.extract_context()
+                    broadcast_scene()
                     binary_buffer = None
     except websockets.exceptions.ConnectionClosed:
         print("[BRAIN] Godot disconnected.")
 
 async def main():
     print("[BRAIN] ZMQ publisher and WebSocket server running...")
+    asyncio.create_task(check_config_updates())
     async with websockets.serve(listen_to_godot, "localhost", 8080, max_size=2**24):
         await asyncio.Future()
 
