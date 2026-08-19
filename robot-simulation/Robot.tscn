@@ -1,19 +1,17 @@
 [gd_scene load_steps=5 format=3 uid="uid://cibstqxe3wqk"]
 
 [ext_resource type="Script" uid="uid://ty8bdpa3xecq" path="res://Movement.gd" id="1_lhh6t"]
+[ext_resource type="Script" uid="uid://chne1i1eppenq" path="res://sensor_hub.gd" id="2_8mo4m"]
 
 [sub_resource type="BoxShape3D" id="BoxShape3D_8p8qe"]
 
 [sub_resource type="BoxMesh" id="BoxMesh_lhh6t"]
 
-[sub_resource type="GDScript" id="GDScript_8p8qe"]
-script/source = "extends RayCast3D
-"
-
 [node name="Robot" type="Node3D"]
 
-[node name="CharacterBody3D" type="CharacterBody3D" parent="."]
+[node name="CharacterBody3D" type="CharacterBody3D" parent="." node_paths=PackedStringArray("sensor_hub")]
 script = ExtResource("1_lhh6t")
+sensor_hub = NodePath("../LiDaR_Sensor/RayCast3D")
 
 [node name="CollisionShape3D" type="CollisionShape3D" parent="CharacterBody3D"]
 shape = SubResource("BoxShape3D_8p8qe")
@@ -25,7 +23,7 @@ mesh = SubResource("BoxMesh_lhh6t")
 [node name="LiDaR_Sensor" type="Node3D" parent="."]
 
 [node name="RayCast3D" type="RayCast3D" parent="LiDaR_Sensor"]
-script = SubResource("GDScript_8p8qe")
+script = ExtResource("2_8mo4m")
 
 [node name="StereoCamera_Rig" type="Node3D" parent="."]
 visible = false
