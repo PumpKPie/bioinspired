@@ -17,6 +17,7 @@ zmq_config_sub.setsockopt_string(zmq.SUBSCRIBE, "")
 CHUNK_SIZE = 10.0  # 10m x 10m spatial grid
 ACTIVE_RADIUS = 1   # 3x3 active window
 
+
 class SpatialChunk:
     def __init__(self, cx, cz, size=CHUNK_SIZE):
         self.cx = cx
@@ -109,6 +110,69 @@ class GeometryClassifier:
         abs_nx, abs_nz = np.abs(normals[:, 0]), np.abs(normals[:, 2])
         return (np.count_nonzero((abs_nx > 0.85) | (abs_nz > 0.85)) / len(normals)) > 0.65
 
+    def _evaluate_trunk_geometry(self, cluster_pts, cluster_norms):
+        """Mathematical scale-invariant classifier using Cross-Section Circularity and PCA."""
+        if len(cluster_pts) < 6:
+            return False, 0.0
+
+        min_b = cluster_pts.min(axis=0)
+        max_b = cluster_pts.max(axis=0)
+        height = max_b[1] - min_b[1]
+
+        # Minimum physical height for stumps/trunks
+        if height < 0.35:
+            return False, 0.0
+
+        # Reject planar boxes, cubes, and flat architectural walls
+        if self._is_sharp_or_box(cluster_norms):
+            return False, 0.0
+
+        # Determine trunk inspection height (lower 60% for tall trees, 100% for short stumps)
+        trunk_y_max = min_b[1] + (height * 0.60 if height >= 1.2 else height)
+        slice_h = 0.30
+        current_y = min_b[1]
+
+        circularity_cvs = []
+
+        # Radial variance evaluation along horizontal slices
+        while current_y < trunk_y_max:
+            next_y = min(current_y + slice_h, trunk_y_max)
+            mask = (cluster_pts[:, 1] >= current_y) & (cluster_pts[:, 1] <= next_y)
+            slice_pts = cluster_pts[mask]
+
+            if len(slice_pts) >= 5:
+                cx = np.median(slice_pts[:, 0])
+                cz = np.median(slice_pts[:, 2])
+                radii = np.sqrt((slice_pts[:, 0] - cx)**2 + (slice_pts[:, 2] - cz)**2)
+                mean_r = np.mean(radii)
+                if mean_r > 0.03:
+                    # Coefficient of variation of radii
+                    cv_r = np.std(radii) / mean_r
+                    circularity_cvs.append(cv_r)
+
+            current_y = next_y
+
+        if circularity_cvs:
+            avg_cv = np.mean(circularity_cvs)
+            # Low radial variance indicates a circular profile (trunk/stump)
+            if avg_cv < 0.38:
+                return True, trunk_y_max
+
+        # PCA fallback for sparse or leaning structures
+        centered = cluster_pts - np.mean(cluster_pts, axis=0)
+        cov = np.dot(centered.T, centered) / len(cluster_pts)
+        eigvals, eigvecs = np.linalg.eigh(cov)
+        primary_axis = eigvecs[:, 2]
+        
+        # Primary axis must be predominantly vertical
+        is_vertical = abs(primary_axis[1]) > 0.65
+        is_elongated = eigvals[2] > (1.8 * eigvals[1])
+
+        if is_vertical and is_elongated and height >= 0.6:
+            return True, trunk_y_max
+
+        return False, 0.0
+
     def _build_lofted_trunk_mesh(self, cluster_pts, trunk_y_max, slice_h=0.35):
         min_y = cluster_pts[:, 1].min()
         rings = []
@@ -124,7 +188,7 @@ class GeometryClassifier:
                 cy = float((current_y + next_y) / 2.0)
                 cz = float(np.mean(slice_pts[:, 2]))
                 radii = np.sqrt((slice_pts[:, 0] - cx)**2 + (slice_pts[:, 2] - cz)**2)
-                r = float(np.clip(np.mean(radii), 0.08, 0.75))
+                r = float(np.clip(np.median(radii), 0.06, 4.0)) # Supports saplings up to 4m wide trees
                 rings.append((cx, cy, cz, r))
 
             current_y = next_y
@@ -209,26 +273,33 @@ class GeometryClassifier:
         for i in range(labels.max() + 1):
             cluster_pts = points[np.where(labels == i)[0]]
             cluster_norms = normals[np.where(labels == i)[0]] if len(normals) == len(points) else np.zeros_like(cluster_pts)
-            if len(cluster_pts) < 6: continue
+            if len(cluster_pts) < 6:
+                continue
 
-            min_b, max_b = cluster_pts.min(axis=0), cluster_pts.max(axis=0)
-            height = max_b[1] - min_b[1]
-            width, depth = max_b[0] - min_b[0], max_b[2] - min_b[2]
+            min_b = cluster_pts.min(axis=0)
 
+            # Floating Obstacles -> Foliage
             if (min_b[1] - floor_level) > 0.8:
                 canopy_meshes.extend(self._reconstruct_foliage_subclusters(cluster_pts))
                 continue
 
-            if (height >= 1.4) and (width < 1.8) and (depth < 1.8) and (not self._is_sharp_or_box(cluster_norms)):
-                trunk_y_max = min_b[1] + (height * 0.55)
+            # Scale-invariant tree/stump verification
+            is_tree, trunk_y_max = self._evaluate_trunk_geometry(cluster_pts, cluster_norms)
+
+            if is_tree:
                 tm = self._build_lofted_trunk_mesh(cluster_pts, trunk_y_max)
-                if tm: trunk_meshes.append(tm)
+                if tm:
+                    trunk_meshes.append(tm)
+                
+                # Canopy above the trunk
                 canopy_pts = cluster_pts[cluster_pts[:, 1] > trunk_y_max]
                 if len(canopy_pts) >= 4:
                     canopy_meshes.extend(self._reconstruct_foliage_subclusters(canopy_pts))
             else:
+                # Rubble / Non-circular boulders / Manmade structures
                 rm = self._reconstruct_distance_bounded_surface(cluster_pts)
-                if rm: rubble_meshes.append(rm)
+                if rm:
+                    rubble_meshes.append(rm)
 
         return trunk_meshes, canopy_meshes, rubble_meshes
 
@@ -240,8 +311,6 @@ class ChunkWorld:
         self.robot_pos = np.array([0.0, 0.0, 0.0])
         self.terrain_builder = TerrainReconstructor(elevation_threshold=0.05, max_triangle_edge=1.3)
         self.classifier = GeometryClassifier(n_sides=8, alpha=1.0, max_closure_distance=2.0)
-        
-        # Persistent global geometry store indexed by chunk origin key
         self.chunk_geometries = {}
 
     def reset(self):
@@ -281,14 +350,13 @@ class ChunkWorld:
     def aggregate_full_world(self, vis_mode):
         active_keys = set(self.get_active_chunk_keys())
 
-        # 1. Reconstruct geometry dynamically for the ACTIVE neighborhood plus a 1-chunk overlap buffer
+        # Seamless buffered neighborhood
         buffered_keys = set()
         for (cx, cz) in active_keys:
             for dx in range(-1, 2):
                 for dz in range(-1, 2):
                     buffered_keys.add((cx + dx, cz + dz))
 
-        # Build buffered unified point cloud to eliminate boundary seams
         buffered_pcd = o3d.geometry.PointCloud()
         for key in buffered_keys:
             if key in self.chunks:
@@ -306,11 +374,9 @@ class ChunkWorld:
             floor_pcd = buffered_pcd.select_by_index(np.where(floor_mask)[0])
             obs_pcd = buffered_pcd.select_by_index(np.where(~floor_mask)[0])
             
-            # Compute seamless geometry for the active domain
             trunks, canopies, rubble = self.classifier.classify_scene(obs_pcd, floor_pcd)
             floor_mesh = self.terrain_builder.reconstruct_ground(floor_pcd)
 
-            # Store geometry back to the central chunk of each active set to persist it globally
             r_cx, r_cz = self.robot_chunk
             self.chunk_geometries[(r_cx, r_cz)] = {
                 "floor_mesh": floor_mesh,
@@ -319,7 +385,7 @@ class ChunkWorld:
                 "rubble": rubble
             }
 
-        # 2. Collect ALL raw points and cached geometries across the entire explored world
+        # Aggregate cumulative world
         agg_raw_points = []
         agg_floor_verts = []
         agg_floor_tris = []
@@ -345,7 +411,7 @@ class ChunkWorld:
             agg_canopies.extend(geom.get("canopies", []))
             agg_rubble.extend(geom.get("rubble", []))
 
-        # 3. Cyan active chunk bounding wireframes
+        # Cyan bounding wireframes
         active_chunk_bounds = []
         for (cx, cz) in active_keys:
             min_x = cx * CHUNK_SIZE
@@ -406,7 +472,7 @@ async def check_config_updates():
 
 async def listen_to_godot(websocket):
     global current_vis_mode, needs_reclassification
-    print("[BRAIN] Buffered Seamless Chunk SLAM online.")
+    print("[BRAIN] Scale-Invariant Chunk SLAM online.")
     try:
         async for message in websocket:
             if isinstance(message, bytes):
@@ -432,7 +498,7 @@ async def listen_to_godot(websocket):
         print("[BRAIN] Godot disconnected.")
 
 async def main():
-    print("[BRAIN] Buffered Chunked World Server running...")
+    print("[BRAIN] Scale-Invariant Geometric Classifier Server running...")
     asyncio.create_task(check_config_updates())
     asyncio.create_task(periodic_reconstruction_loop())
     async with websockets.serve(listen_to_godot, "localhost", 8080, max_size=2**24):
