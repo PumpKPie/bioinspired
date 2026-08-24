@@ -25,4 +25,5 @@ mesh = SubResource("BoxMesh_lhh6t")
 [node name="RayCast3D" type="RayCast3D" parent="LiDaR_Sensor"]
 script = ExtResource("2_8mo4m")
 
-[node name="StereoRig" type="Node3D" parent="."]
+[node name="StereoCamera_Rig" type="Node3D" parent="."]
+visible = false
