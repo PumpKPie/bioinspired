@@ -1,6 +1,30 @@
 import open3d as o3d
 import numpy as np
 import zmq
+import ctypes
+from ctypes import wintypes
+
+# 1. Force Windows DPI Awareness
+try:
+    ctypes.windll.shcore.SetProcessDpiAwareness(2)
+except Exception:
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
+
+# 2. Get exact usable monitor bounds
+rect = wintypes.RECT()
+ctypes.windll.user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(rect), 0)
+work_left = rect.left
+work_top = rect.top
+work_w = rect.right - rect.left
+work_h = rect.bottom - rect.top
+
+half_w = int(work_w // 2)
+half_h = int(work_h // 2)
+target_x = int(work_left + half_w)
+target_y = int(work_top + half_h)
 
 context = zmq.Context()
 zmq_subscriber = context.socket(zmq.SUB)
@@ -13,19 +37,28 @@ zmq_config_pub.connect("tcp://127.0.0.1:5556")
 print("[RENDER] Starting Digital Twin Visualizer...")
 
 vis = o3d.visualization.VisualizerWithKeyCallback()
-vis.create_window(window_name="Digital Twin: Persistent Chunked Visualizer", width=1280, height=720)
+window_title = "Digital Twin: Persistent Chunked Visualizer"
+vis.create_window(
+    window_name=window_title,
+    width=half_w,
+    height=half_h,
+    left=target_x,
+    top=target_y,
+    visible=True
+)
+
+hwnd = ctypes.windll.user32.FindWindowW(None, window_title)
+if hwnd:
+    ctypes.windll.user32.MoveWindow(hwnd, target_x, target_y, half_w, half_h, True)
 
 render_opt = vis.get_render_option()
 render_opt.mesh_show_back_face = True
 
-COLOR_TRUNK   = [0.212, 0.082, 0.078] # #361514
-COLOR_CANOPY  = [0.184, 0.302, 0.251] # #2f4d40
-COLOR_RUBBLE  = [0.267, 0.290, 0.310] # #444a4f
-COLOR_FLOOR   = [0.450, 0.360, 0.260] # Ground
-COLOR_CYAN    = [0.000, 1.000, 1.000] # #00FFFF Active Chunk Wireframe
-
-COLOR_POINTS_ALONE  = [0.90, 0.70, 0.10]
-COLOR_POINTS_HYBRID = [0.45, 0.35, 0.05]
+COLOR_TRUNK   = [0.212, 0.082, 0.078]
+COLOR_CANOPY  = [0.184, 0.302, 0.251]
+COLOR_RUBBLE  = [0.267, 0.290, 0.310]
+COLOR_FLOOR   = [0.450, 0.360, 0.260]
+COLOR_CYAN    = [0.000, 1.000, 1.000]
 
 pcd_vis = o3d.geometry.PointCloud()
 floor_mesh_vis = o3d.geometry.TriangleMesh()
@@ -65,11 +98,13 @@ def print_legend():
     print("  • 'R'       : Reset Map & Clear Data [Godot]")
     print("-" * 58)
     print(" [COLOR PALETTE]")
-    print("  • Cyan Box : #00FFFF (Active Loaded Minecraft Chunks)")
-    print("  • Trunks   : #361514 (Deep Wood Brown)")
-    print("  • Canopies : #2f4d40 (Foliage Green)")
-    print("  • Rubble   : #444a4f (Structure Slate Gray)")
-    print("  • Ground   : #735c42 (Traversable Terrain)")
+    print("  • LiDAR Points : #F2CC19 (Golden Yellow)")
+    print("  • Camera Fill  : #FF6C0D (Orange Tint)")
+    print("  • Cyan Box     : #00FFFF (Active Loaded Chunks)")
+    print("  • Trunks       : #361514 (Deep Wood Brown)")
+    print("  • Canopies     : #2f4d40 (Foliage Green)")
+    print("  • Rubble       : #444a4f (Structure Slate Gray)")
+    print("  • Ground       : #735c42 (Traversable Terrain)")
     print("="*58 + "\n")
 
 def send_config():
@@ -156,19 +191,27 @@ def render_scene(data, mode):
         opt.mesh_show_wireframe = False
         opt.point_size = 2.5
 
-    # 1. Point Cloud Layer
+    # 1. Point Cloud Layer with Sensor-Specific Colors
     if mode in (0, 2):
         raw_pts = data.get("raw_points", [])
+        raw_cols = data.get("raw_colors", [])
         if len(raw_pts) > 0:
             pcd_vis.points = o3d.utility.Vector3dVector(raw_pts)
-            pt_color = COLOR_POINTS_HYBRID if mode == 2 else COLOR_POINTS_ALONE
-            pcd_vis.paint_uniform_color(pt_color)
+            if len(raw_cols) == len(raw_pts):
+                cols = np.array(raw_cols, dtype=np.float64)
+                if mode == 2:
+                    cols *= 0.7  # Dim slightly in hybrid mode for mesh readability
+                pcd_vis.colors = o3d.utility.Vector3dVector(cols)
+            else:
+                pcd_vis.paint_uniform_color([0.9, 0.7, 0.1])
             vis.update_geometry(pcd_vis)
         else:
             pcd_vis.points = o3d.utility.Vector3dVector([])
+            pcd_vis.colors = o3d.utility.Vector3dVector([])
             vis.update_geometry(pcd_vis)
     else:
         pcd_vis.points = o3d.utility.Vector3dVector([])
+        pcd_vis.colors = o3d.utility.Vector3dVector([])
         vis.update_geometry(pcd_vis)
 
     # 2. Reconstructed Geometry Layer
@@ -229,6 +272,7 @@ while True:
             clear_geometry_meshes()
             clear_chunk_boxes()
             pcd_vis.points = o3d.utility.Vector3dVector([])
+            pcd_vis.colors = o3d.utility.Vector3dVector([])
             floor_mesh_vis.vertices = o3d.utility.Vector3dVector([])
             floor_mesh_vis.triangles = o3d.utility.Vector3iVector([])
             vis.update_geometry(pcd_vis)

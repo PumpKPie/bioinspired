@@ -29,7 +29,7 @@ var current_v: float = 0.0
 var vis_mode: int = 1
 
 var continuous_streaming: bool = false
-var stream_interval: float = 0.1
+var stream_interval: float = 0.1 # 10 Hz
 var stream_timer: float = 0.0
 var streaming_world_buffer := PackedVector3Array()
 
@@ -45,7 +45,7 @@ func _process(delta):
 	var state = socket.get_ready_state()
 	if state == WebSocketPeer.STATE_OPEN:
 		if not is_connected_to_python:
-			print("[Godot] Chunked SLAM stream connected.")
+			print("[Godot] Continuous SLAM Connected to Python.")
 			is_connected_to_python = true
 		while socket.get_available_packet_count():
 			var packet = socket.get_packet().get_string_from_utf8()
@@ -59,14 +59,13 @@ func _process(delta):
 
 func toggle_continuous_stream():
 	continuous_streaming = not continuous_streaming
-	print("[Godot] Continuous Real-Time Streaming: ", "ENABLED" if continuous_streaming else "DISABLED")
+	print("[Godot] Continuous Real-Time Streaming: ", "ENABLED (10 Hz)" if continuous_streaming else "DISABLED")
 
 func cycle_vis_mode():
 	vis_mode = (vis_mode + 1) % 3
 	if socket.get_ready_state() == WebSocketPeer.STATE_OPEN:
 		socket.send_text(JSON.stringify({"command": "set_vis_mode", "mode": vis_mode}))
 
-# Sends robot global position in 12 bytes + raw world points
 func _pack_stream_packet(robot_pos: Vector3, world_points: PackedVector3Array) -> PackedByteArray:
 	var pos_bytes = PackedFloat32Array([robot_pos.x, robot_pos.y, robot_pos.z]).to_byte_array()
 	return pos_bytes + world_points.to_byte_array()
@@ -78,10 +77,9 @@ func process_streaming(robot_transform: Transform3D):
 	stream_timer += get_physics_process_delta_time()
 	if stream_timer >= stream_interval:
 		stream_timer = 0.0
-		if streaming_world_buffer.size() >= 10:
-			var packet = _pack_stream_packet(robot_transform.origin, streaming_world_buffer)
-			socket.put_packet(packet)
-			streaming_world_buffer.clear()
+		var packet = _pack_stream_packet(robot_transform.origin, streaming_world_buffer)
+		socket.put_packet(packet)
+		streaming_world_buffer.clear()
 
 func export_single_scan(robot_transform: Transform3D):
 	if not is_connected_to_python or point_cloud.is_empty():
@@ -121,6 +119,7 @@ func run_intensity_sweep(body: CharacterBody3D):
 	for i in range(rays_per_frame):
 		var h_rad = deg_to_rad(current_h)
 		var v_rad = deg_to_rad(current_v)
+		# Sweep center begins at 0 deg (native -Z forward)
 		var local_dir = Vector3(sin(h_rad)*cos(v_rad), sin(v_rad), -cos(h_rad)*cos(v_rad))
 		var ray_dir = body.global_transform.basis * local_dir
 		
@@ -129,6 +128,9 @@ func run_intensity_sweep(body: CharacterBody3D):
 		var result = space_state.intersect_ray(query)
 		
 		if result:
+			if continuous_streaming and streaming_world_buffer.size() < 600:
+				streaming_world_buffer.append(result.position)
+
 			var voxel_key = Vector3i(round(result.position.x/voxel_size), round(result.position.y/voxel_size), round(result.position.z/voxel_size))
 			if not occupied_voxels.has(voxel_key):
 				occupied_voxels[voxel_key] = true
@@ -142,7 +144,6 @@ func run_intensity_sweep(body: CharacterBody3D):
 					color_cloud.remove_at(0)
 				
 				point_cloud.append(result.position)
-				streaming_world_buffer.append(result.position)
 				color_cloud.append(pt_color)
 				added = true
 		
@@ -176,7 +177,8 @@ func draw_forward_ray(body: CharacterBody3D):
 	imm.clear_surfaces()
 	imm.surface_begin(Mesh.PRIMITIVE_LINES)
 	imm.surface_add_vertex(body.global_position)
-	var forward_endpoint = body.global_position + (body.global_transform.basis * (Vector3.FORWARD * -2.0))
+	# Native Godot -Z Forward
+	var forward_endpoint = body.global_position + (body.global_transform.basis * (Vector3.FORWARD * 2.0))
 	imm.surface_add_vertex(forward_endpoint) 
 	imm.surface_end()
 
@@ -188,7 +190,4 @@ func clear_all_data():
 	update_mesh()
 	if socket.get_ready_state() == WebSocketPeer.STATE_OPEN:
 		socket.send_text(JSON.stringify({"command": "reset_map"}))
-	print("[Godot] Local points and remote chunks cleared.")
-
-func save_to_local_txt():
-	pass
+	print("[Godot] Map reset.")

@@ -1,7 +1,8 @@
-[gd_scene load_steps=5 format=3 uid="uid://cibstqxe3wqk"]
+[gd_scene load_steps=6 format=3 uid="uid://cibstqxe3wqk"]
 
 [ext_resource type="Script" uid="uid://ty8bdpa3xecq" path="res://Movement.gd" id="1_lhh6t"]
 [ext_resource type="Script" uid="uid://chne1i1eppenq" path="res://sensor_hub.gd" id="2_8mo4m"]
+[ext_resource type="Script" uid="uid://c0wvcnpr42uk8" path="res://stereo_rig.gd" id="2_gr7he"]
 
 [sub_resource type="BoxShape3D" id="BoxShape3D_8p8qe"]
 
@@ -19,6 +20,29 @@ shape = SubResource("BoxShape3D_8p8qe")
 [node name="MeshInstance3D" type="MeshInstance3D" parent="CharacterBody3D"]
 layers = 2
 mesh = SubResource("BoxMesh_lhh6t")
+
+[node name="CameraRig" type="Node3D" parent="CharacterBody3D"]
+script = ExtResource("2_gr7he")
+
+[node name="SubViewportLeft" type="SubViewport" parent="CharacterBody3D/CameraRig"]
+size = Vector2i(320, 240)
+render_target_update_mode = 4
+
+[node name="CamLeft" type="Camera3D" parent="CharacterBody3D/CameraRig/SubViewportLeft"]
+cull_mask = 1047553
+fov = 70.0
+near = 0.01
+far = 25.0
+
+[node name="SubViewportRight" type="SubViewport" parent="CharacterBody3D/CameraRig"]
+size = Vector2i(320, 240)
+render_target_update_mode = 4
+
+[node name="CamRight" type="Camera3D" parent="CharacterBody3D/CameraRig/SubViewportRight"]
+cull_mask = 1047553
+fov = 70.0
+near = 0.01
+far = 25.0
 
 [node name="LiDaR_Sensor" type="Node3D" parent="."]
 

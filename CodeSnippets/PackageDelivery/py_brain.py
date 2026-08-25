@@ -6,6 +6,7 @@ import open3d as o3d
 import zmq
 from scipy.spatial import Delaunay
 
+# ZMQ Publishers & Subscribers
 context = zmq.Context()
 zmq_publisher = context.socket(zmq.PUB)
 zmq_publisher.bind("tcp://127.0.0.1:5555")
@@ -14,27 +15,85 @@ zmq_config_sub = context.socket(zmq.SUB)
 zmq_config_sub.bind("tcp://127.0.0.1:5556")
 zmq_config_sub.setsockopt_string(zmq.SUBSCRIBE, "")
 
+zmq_stereo_sub = context.socket(zmq.SUB)
+zmq_stereo_sub.connect("tcp://127.0.0.1:5557")
+zmq_stereo_sub.setsockopt_string(zmq.SUBSCRIBE, "")
+
 CHUNK_SIZE = 10.0  # 10m x 10m spatial grid
 ACTIVE_RADIUS = 1   # 3x3 active window
+
 
 class SpatialChunk:
     def __init__(self, cx, cz, size=CHUNK_SIZE):
         self.cx = cx
         self.cz = cz
         self.size = size
-        self.pcd = o3d.geometry.PointCloud()
+        self.lidar_pcd = o3d.geometry.PointCloud()
+        self.camera_fill_pcd = o3d.geometry.PointCloud()
         self.dirty = False
 
-    def add_points(self, new_world_points, voxel_size=0.15):
+    def add_lidar_points(self, new_world_points, voxel_size=0.15):
         if len(new_world_points) == 0:
             return
         incoming = o3d.geometry.PointCloud()
         incoming.points = o3d.utility.Vector3dVector(new_world_points)
-        self.pcd += incoming
-        self.pcd = self.pcd.voxel_down_sample(voxel_size)
-        self.pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.4, max_nn=25))
-        self.pcd.orient_normals_towards_camera_location(np.array([0., 100., 0.]))
+        self.lidar_pcd += incoming
+        self.lidar_pcd = self.lidar_pcd.voxel_down_sample(voxel_size)
+        self.lidar_pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.4, max_nn=25))
+        self.lidar_pcd.orient_normals_towards_camera_location(np.array([0.0, 100.0, 0.0]))
         self.dirty = True
+
+    def add_camera_points_by_density(self, new_camera_points, search_radius=0.25, max_lidar_neighbors=3):
+        if len(new_camera_points) == 0:
+            return
+
+        # If chunk has no LiDAR points yet, accept initial camera fill
+        if len(self.lidar_pcd.points) < 4:
+            incoming = o3d.geometry.PointCloud()
+            incoming.points = o3d.utility.Vector3dVector(new_camera_points)
+            self.camera_fill_pcd += incoming
+            self.camera_fill_pcd = self.camera_fill_pcd.voxel_down_sample(0.08)
+            self.dirty = True
+            return
+
+        # Query local spatial density against existing LiDAR structure
+        lidar_tree = o3d.geometry.KDTreeFlann(self.lidar_pcd)
+        sparse_fill = []
+
+        for pt in new_camera_points:
+            [k, _, _] = lidar_tree.search_radius_vector_3d(pt, search_radius)
+            # Accept ONLY if LiDAR density in this area is low
+            if k < max_lidar_neighbors:
+                sparse_fill.append(pt)
+
+        if len(sparse_fill) < 4:
+            return
+
+        incoming = o3d.geometry.PointCloud()
+        incoming.points = o3d.utility.Vector3dVector(np.array(sparse_fill))
+        self.camera_fill_pcd += incoming
+        self.camera_fill_pcd = self.camera_fill_pcd.voxel_down_sample(0.08)
+        self.dirty = True
+
+    def extract_context(self):
+        combined_pcd = self.lidar_pcd + self.camera_fill_pcd
+        points = np.asarray(combined_pcd.points)
+        if len(points) < 10:
+            return None, None
+
+        combined_pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.4, max_nn=25))
+        combined_pcd.orient_normals_towards_camera_location(np.array([0.0, 100.0, 0.0]))
+        normals = np.asarray(combined_pcd.normals)
+
+        upward_mask = np.abs(normals[:, 1]) > 0.82
+        all_y = points[:, 1]
+        ground_baseline = np.percentile(all_y, 15)
+
+        floor_mask = upward_mask & (all_y <= (ground_baseline + 0.65))
+        floor_pcd = combined_pcd.select_by_index(np.where(floor_mask)[0])
+        obstacle_pcd = combined_pcd.select_by_index(np.where(~floor_mask)[0])
+
+        return floor_pcd, obstacle_pcd
 
 
 class TerrainReconstructor:
@@ -67,7 +126,11 @@ class TerrainReconstructor:
             flat_sparse = flat_pcd.voxel_down_sample(voxel_size=0.25)
             sparse_pts = np.asarray(flat_sparse.points)
             sig_pts = points[list(keep_indices)]
-            combined_pts = np.vstack((sig_pts, sparse_pts)) if (len(sig_pts) > 0 and len(sparse_pts) > 0) else (sig_pts if len(sig_pts) > 0 else sparse_pts)
+            combined_pts = (
+                np.vstack((sig_pts, sparse_pts))
+                if (len(sig_pts) > 0 and len(sparse_pts) > 0)
+                else (sig_pts if len(sig_pts) > 0 else sparse_pts)
+            )
         else:
             combined_pts = points[list(keep_indices)] if len(keep_indices) > 0 else points
 
@@ -123,7 +186,7 @@ class GeometryClassifier:
                 cx = float(np.mean(slice_pts[:, 0]))
                 cy = float((current_y + next_y) / 2.0)
                 cz = float(np.mean(slice_pts[:, 2]))
-                radii = np.sqrt((slice_pts[:, 0] - cx)**2 + (slice_pts[:, 2] - cz)**2)
+                radii = np.sqrt((slice_pts[:, 0] - cx) ** 2 + (slice_pts[:, 2] - cz) ** 2)
                 r = float(np.clip(np.mean(radii), 0.08, 0.75))
                 rings.append((cx, cy, cz, r))
 
@@ -134,7 +197,7 @@ class GeometryClassifier:
 
         vertices = []
         angles = np.linspace(0, 2 * np.pi, self.n_sides, endpoint=False)
-        for (cx, cy, cz, r) in rings:
+        for cx, cy, cz, r in rings:
             for angle in angles:
                 vertices.append([cx + r * np.cos(angle), cy, cz + r * np.sin(angle)])
 
@@ -172,7 +235,11 @@ class GeometryClassifier:
             e0 = np.linalg.norm(v[tri[:, 0]] - v[tri[:, 1]], axis=1)
             e1 = np.linalg.norm(v[tri[:, 1]] - v[tri[:, 2]], axis=1)
             e2 = np.linalg.norm(v[tri[:, 2]] - v[tri[:, 0]], axis=1)
-            filtered_tri = tri[(e0 <= self.max_closure_distance) & (e1 <= self.max_closure_distance) & (e2 <= self.max_closure_distance)]
+            filtered_tri = tri[
+                (e0 <= self.max_closure_distance)
+                & (e1 <= self.max_closure_distance)
+                & (e2 <= self.max_closure_distance)
+            ]
             if len(filtered_tri) == 0:
                 return None
             mesh.triangles = o3d.utility.Vector3iVector(filtered_tri)
@@ -191,7 +258,8 @@ class GeometryClassifier:
             sub_pts = points[np.where(sub_labels == j)[0]]
             if len(sub_pts) >= 4:
                 m = self._reconstruct_distance_bounded_surface(sub_pts)
-                if m: meshes.append(m)
+                if m:
+                    meshes.append(m)
         return meshes
 
     def classify_scene(self, obstacle_pcd, floor_pcd):
@@ -209,7 +277,8 @@ class GeometryClassifier:
         for i in range(labels.max() + 1):
             cluster_pts = points[np.where(labels == i)[0]]
             cluster_norms = normals[np.where(labels == i)[0]] if len(normals) == len(points) else np.zeros_like(cluster_pts)
-            if len(cluster_pts) < 6: continue
+            if len(cluster_pts) < 6:
+                continue
 
             min_b, max_b = cluster_pts.min(axis=0), cluster_pts.max(axis=0)
             height = max_b[1] - min_b[1]
@@ -222,13 +291,15 @@ class GeometryClassifier:
             if (height >= 1.4) and (width < 1.8) and (depth < 1.8) and (not self._is_sharp_or_box(cluster_norms)):
                 trunk_y_max = min_b[1] + (height * 0.55)
                 tm = self._build_lofted_trunk_mesh(cluster_pts, trunk_y_max)
-                if tm: trunk_meshes.append(tm)
+                if tm:
+                    trunk_meshes.append(tm)
                 canopy_pts = cluster_pts[cluster_pts[:, 1] > trunk_y_max]
                 if len(canopy_pts) >= 4:
                     canopy_meshes.extend(self._reconstruct_foliage_subclusters(canopy_pts))
             else:
                 rm = self._reconstruct_distance_bounded_surface(cluster_pts)
-                if rm: rubble_meshes.append(rm)
+                if rm:
+                    rubble_meshes.append(rm)
 
         return trunk_meshes, canopy_meshes, rubble_meshes
 
@@ -240,8 +311,6 @@ class ChunkWorld:
         self.robot_pos = np.array([0.0, 0.0, 0.0])
         self.terrain_builder = TerrainReconstructor(elevation_threshold=0.05, max_triangle_edge=1.3)
         self.classifier = GeometryClassifier(n_sides=8, alpha=1.0, max_closure_distance=2.0)
-        
-        # Persistent global geometry store indexed by chunk origin key
         self.chunk_geometries = {}
 
     def reset(self):
@@ -254,21 +323,31 @@ class ChunkWorld:
             self.chunks[key] = SpatialChunk(cx, cz)
         return self.chunks[key]
 
-    def ingest_direct_world_points(self, world_points, robot_pos):
+    def ingest_lidar_points(self, world_points, robot_pos):
+        self.robot_pos = robot_pos
+        self.robot_chunk = (int(np.floor(robot_pos[0] / CHUNK_SIZE)), int(np.floor(robot_pos[2] / CHUNK_SIZE)))
         if len(world_points) == 0:
             return
 
-        self.robot_pos = robot_pos
-        self.robot_chunk = (int(np.floor(robot_pos[0] / CHUNK_SIZE)), int(np.floor(robot_pos[2] / CHUNK_SIZE)))
-
         cx_indices = np.floor(world_points[:, 0] / CHUNK_SIZE).astype(int)
         cz_indices = np.floor(world_points[:, 2] / CHUNK_SIZE).astype(int)
-        
         unique_keys = np.unique(np.column_stack((cx_indices, cz_indices)), axis=0)
-        for (cx, cz) in unique_keys:
+        for cx, cz in unique_keys:
             mask = (cx_indices == cx) & (cz_indices == cz)
             chunk = self.get_chunk(int(cx), int(cz))
-            chunk.add_points(world_points[mask])
+            chunk.add_lidar_points(world_points[mask])
+
+    def ingest_camera_points(self, camera_world_points):
+        if len(camera_world_points) == 0:
+            return
+
+        cx_indices = np.floor(camera_world_points[:, 0] / CHUNK_SIZE).astype(int)
+        cz_indices = np.floor(camera_world_points[:, 2] / CHUNK_SIZE).astype(int)
+        unique_keys = np.unique(np.column_stack((cx_indices, cz_indices)), axis=0)
+        for cx, cz in unique_keys:
+            mask = (cx_indices == cx) & (cz_indices == cz)
+            chunk = self.get_chunk(int(cx), int(cz))
+            chunk.add_camera_points_by_density(camera_world_points[mask])
 
     def get_active_chunk_keys(self):
         r_cx, r_cz = self.robot_chunk
@@ -281,56 +360,70 @@ class ChunkWorld:
     def aggregate_full_world(self, vis_mode):
         active_keys = set(self.get_active_chunk_keys())
 
-        # 1. Reconstruct geometry dynamically for the ACTIVE neighborhood plus a 1-chunk overlap buffer
         buffered_keys = set()
-        for (cx, cz) in active_keys:
+        for cx, cz in active_keys:
             for dx in range(-1, 2):
                 for dz in range(-1, 2):
                     buffered_keys.add((cx + dx, cz + dz))
 
-        # Build buffered unified point cloud to eliminate boundary seams
-        buffered_pcd = o3d.geometry.PointCloud()
-        for key in buffered_keys:
-            if key in self.chunks:
-                buffered_pcd += self.chunks[key].pcd
+        floor_chunks = [self.chunks[k].extract_context()[0] for k in buffered_keys if k in self.chunks and self.chunks[k].extract_context()[0] is not None]
+        obs_chunks = [self.chunks[k].extract_context()[1] for k in buffered_keys if k in self.chunks and self.chunks[k].extract_context()[1] is not None]
 
-        if len(buffered_pcd.points) >= 10:
-            b_pts = np.asarray(buffered_pcd.points)
-            b_norms = np.asarray(buffered_pcd.normals)
-            
-            upward_mask = np.abs(b_norms[:, 1]) > 0.82
-            all_y = b_pts[:, 1]
-            ground_baseline = np.percentile(all_y, 15)
-            floor_mask = upward_mask & (all_y <= (ground_baseline + 0.65))
-            
-            floor_pcd = buffered_pcd.select_by_index(np.where(floor_mask)[0])
-            obs_pcd = buffered_pcd.select_by_index(np.where(~floor_mask)[0])
-            
-            # Compute seamless geometry for the active domain
-            trunks, canopies, rubble = self.classifier.classify_scene(obs_pcd, floor_pcd)
-            floor_mesh = self.terrain_builder.reconstruct_ground(floor_pcd)
+        if floor_chunks and obs_chunks:
+            buffered_floor_pcd = o3d.geometry.PointCloud()
+            for f in floor_chunks:
+                buffered_floor_pcd += f
+            buffered_obs_pcd = o3d.geometry.PointCloud()
+            for o in obs_chunks:
+                buffered_obs_pcd += o
 
-            # Store geometry back to the central chunk of each active set to persist it globally
+            trunks, canopies, rubble = self.classifier.classify_scene(buffered_obs_pcd, buffered_floor_pcd)
+            floor_mesh = self.terrain_builder.reconstruct_ground(buffered_floor_pcd)
+
             r_cx, r_cz = self.robot_chunk
             self.chunk_geometries[(r_cx, r_cz)] = {
                 "floor_mesh": floor_mesh,
                 "trunks": trunks,
                 "canopies": canopies,
-                "rubble": rubble
+                "rubble": rubble,
             }
 
-        # 2. Collect ALL raw points and cached geometries across the entire explored world
-        agg_raw_points = []
+        # Collect and color-code points by sensor origin
+        agg_lidar_pts = []
+        agg_cam_pts = []
+
+        for chunk in self.chunks.values():
+            if len(chunk.lidar_pcd.points) > 0:
+                agg_lidar_pts.append(np.asarray(chunk.lidar_pcd.points))
+            if len(chunk.camera_fill_pcd.points) > 0:
+                agg_cam_pts.append(np.asarray(chunk.camera_fill_pcd.points))
+
+        pts_list = []
+        cols_list = []
+
+        # 1. LiDAR Points -> Warm Yellow [0.95, 0.80, 0.10]
+        if agg_lidar_pts:
+            combined_lidar = np.vstack(agg_lidar_pts)
+            pts_list.append(combined_lidar)
+            lidar_colors = np.tile(np.array([0.95, 0.80, 0.10], dtype=np.float32), (len(combined_lidar), 1))
+            cols_list.append(lidar_colors)
+
+        # 2. Camera Fill Points -> Orange Tint [1.00, 0.42, 0.05]
+        if agg_cam_pts:
+            combined_cam = np.vstack(agg_cam_pts)
+            pts_list.append(combined_cam)
+            cam_colors = np.tile(np.array([1.00, 0.42, 0.05], dtype=np.float32), (len(combined_cam), 1))
+            cols_list.append(cam_colors)
+
+        combined_raw = np.vstack(pts_list) if pts_list else np.empty((0, 3), dtype=np.float32)
+        combined_colors = np.vstack(cols_list) if cols_list else np.empty((0, 3), dtype=np.float32)
+
         agg_floor_verts = []
         agg_floor_tris = []
         agg_trunks = []
         agg_canopies = []
         agg_rubble = []
         vert_offset = 0
-
-        for chunk in self.chunks.values():
-            if len(chunk.pcd.points) > 0:
-                agg_raw_points.append(np.asarray(chunk.pcd.points))
 
         for geom in self.chunk_geometries.values():
             f_mesh = geom.get("floor_mesh")
@@ -345,32 +438,29 @@ class ChunkWorld:
             agg_canopies.extend(geom.get("canopies", []))
             agg_rubble.extend(geom.get("rubble", []))
 
-        # 3. Cyan active chunk bounding wireframes
         active_chunk_bounds = []
-        for (cx, cz) in active_keys:
+        for cx, cz in active_keys:
             min_x = cx * CHUNK_SIZE
             max_x = min_x + CHUNK_SIZE
             min_z = cz * CHUNK_SIZE
             max_z = min_z + CHUNK_SIZE
             min_y = float(self.robot_pos[1] - 1.0)
             max_y = float(self.robot_pos[1] + 5.0)
-            active_chunk_bounds.append({
-                "min": [min_x, min_y, min_z],
-                "max": [max_x, max_y, max_z]
-            })
+            active_chunk_bounds.append({"min": [min_x, min_y, min_z], "max": [max_x, max_y, max_z]})
 
-        combined_raw = np.vstack(agg_raw_points) if len(agg_raw_points) > 0 else np.empty((0, 3))
         combined_floor = {"vertices": agg_floor_verts, "triangles": agg_floor_tris} if len(agg_floor_verts) > 0 else None
 
         return {
             "type": "map_update",
             "vis_mode": vis_mode,
             "raw_points": combined_raw,
+            "raw_colors": combined_colors,
             "floor_mesh": combined_floor,
             "trunks": agg_trunks,
             "canopies": agg_canopies,
-            "rubble": agg_rubble,
-            "active_chunks": active_chunk_bounds
+            "rubble": rubble,
+            "active_chunks": active_chunk_bounds,
+            "robot_pos": self.robot_pos.tolist(),
         }
 
 
@@ -378,9 +468,11 @@ world = ChunkWorld()
 current_vis_mode = 1
 needs_reclassification = False
 
+
 def broadcast_scene():
     payload = world.aggregate_full_world(current_vis_mode)
     zmq_publisher.send_pyobj(payload)
+
 
 async def periodic_reconstruction_loop():
     global needs_reclassification
@@ -389,6 +481,7 @@ async def periodic_reconstruction_loop():
             broadcast_scene()
             needs_reclassification = False
         await asyncio.sleep(0.33)
+
 
 async def check_config_updates():
     while True:
@@ -404,15 +497,29 @@ async def check_config_updates():
             pass
         await asyncio.sleep(0.05)
 
+
+async def check_stereo_stream():
+    global needs_reclassification
+    while True:
+        try:
+            msg = zmq_stereo_sub.recv_pyobj(flags=zmq.NOBLOCK)
+            if msg.get("type") == "stereo_points":
+                world.ingest_camera_points(msg["points"])
+                needs_reclassification = True
+        except zmq.Again:
+            pass
+        await asyncio.sleep(0.02)
+
+
 async def listen_to_godot(websocket):
     global current_vis_mode, needs_reclassification
-    print("[BRAIN] Buffered Seamless Chunk SLAM online.")
+    print("[BRAIN] Density-Gated SLAM Connected.")
     try:
         async for message in websocket:
             if isinstance(message, bytes):
                 robot_pos = np.frombuffer(message[:12], dtype=np.float32)
                 world_points = np.frombuffer(message[12:], dtype=np.float32).reshape(-1, 3)
-                world.ingest_direct_world_points(world_points, robot_pos)
+                world.ingest_lidar_points(world_points, robot_pos)
                 needs_reclassification = True
 
             elif isinstance(message, str):
@@ -426,17 +533,20 @@ async def listen_to_godot(websocket):
                 elif data.get("command") == "reset_map":
                     world.reset()
                     zmq_publisher.send_pyobj({"type": "reset_map"})
-                    print("[BRAIN] Full world reset.")
+                    print("[BRAIN] Full map reset.")
 
     except websockets.exceptions.ConnectionClosed:
         print("[BRAIN] Godot disconnected.")
 
+
 async def main():
-    print("[BRAIN] Buffered Chunked World Server running...")
+    print("[BRAIN] Density-Gated Multi-Modal Engine online...")
     asyncio.create_task(check_config_updates())
     asyncio.create_task(periodic_reconstruction_loop())
+    asyncio.create_task(check_stereo_stream())
     async with websockets.serve(listen_to_godot, "localhost", 8080, max_size=2**24):
         await asyncio.Future()
+
 
 if __name__ == "__main__":
     try:
