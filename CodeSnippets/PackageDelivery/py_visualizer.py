@@ -59,12 +59,21 @@ COLOR_CANOPY  = [0.184, 0.302, 0.251]
 COLOR_RUBBLE  = [0.267, 0.290, 0.310]
 COLOR_FLOOR   = [0.450, 0.360, 0.260]
 COLOR_CYAN    = [0.000, 1.000, 1.000]
+COLOR_ROBOT   = [1.000, 0.100, 0.400]  # Neon Coral-Red Marker
 
 pcd_vis = o3d.geometry.PointCloud()
 floor_mesh_vis = o3d.geometry.TriangleMesh()
 
+# Robot Engine Pose Marker (0.25m Radius Sphere)
+robot_sphere_template = o3d.geometry.TriangleMesh.create_sphere(radius=0.25, resolution=14)
+robot_sphere_base_verts = np.asarray(robot_sphere_template.vertices).copy()
+robot_marker = o3d.geometry.TriangleMesh(robot_sphere_template)
+robot_marker.compute_vertex_normals()
+robot_marker.paint_uniform_color(COLOR_ROBOT)
+
 vis.add_geometry(pcd_vis)
 vis.add_geometry(floor_mesh_vis)
+vis.add_geometry(robot_marker)
 
 active_geom_meshes = []
 active_chunk_line_sets = []
@@ -80,10 +89,10 @@ def print_legend():
     mode_names = {0: "0 (Points Only)", 1: "1 (Geometry Only)", 2: "2 (Hybrid Mode)"}
     active_mode_str = mode_names.get(current_vis_mode, str(current_vis_mode))
     
-    print("\n" + "="*58)
+    print("\n" + "=" * 58)
     print("         DIGITAL TWIN: PARAMETER & CONTROLS HUD          ")
-    print("="*58)
-    print(f" [PARAMETERS]")
+    print("=" * 58)
+    print(" [PARAMETERS]")
     print(f"  • Connectivity (Alpha) : {curr_alpha:.2f} m  ([']'/']' to tune)")
     print(f"  • Max Cluster Gap      : {curr_max_gap:.2f} m  ('-'/'=' to tune)")
     print(f"  • Visualization Mode   : {active_mode_str} (Press 'V' in Godot)")
@@ -98,6 +107,7 @@ def print_legend():
     print("  • 'R'       : Reset Map & Clear Data [Godot]")
     print("-" * 58)
     print(" [COLOR PALETTE]")
+    print("  • Robot Marker : #FF1A66 (Engine Pose Sphere)")
     print("  • LiDAR Points : #F2CC19 (Golden Yellow)")
     print("  • Camera Fill  : #FF6C0D (Orange Tint)")
     print("  • Cyan Box     : #00FFFF (Active Loaded Chunks)")
@@ -105,7 +115,7 @@ def print_legend():
     print("  • Canopies     : #2f4d40 (Foliage Green)")
     print("  • Rubble       : #444a4f (Structure Slate Gray)")
     print("  • Ground       : #735c42 (Traversable Terrain)")
-    print("="*58 + "\n")
+    print("=" * 58 + "\n")
 
 def send_config():
     if show_legend:
@@ -191,7 +201,15 @@ def render_scene(data, mode):
         opt.mesh_show_wireframe = False
         opt.point_size = 2.5
 
-    # 1. Point Cloud Layer with Sensor-Specific Colors
+    # 1. Update Robot Engine Marker Position
+    robot_pos = data.get("robot_pos")
+    if robot_pos is not None and len(robot_pos) == 3:
+        r_pos = np.array(robot_pos, dtype=np.float64)
+        robot_marker.vertices = o3d.utility.Vector3dVector(robot_sphere_base_verts + r_pos)
+        robot_marker.compute_vertex_normals()
+        vis.update_geometry(robot_marker)
+
+    # 2. Point Cloud Layer with Sensor-Specific Colors
     if mode in (0, 2):
         raw_pts = data.get("raw_points", [])
         raw_cols = data.get("raw_colors", [])
@@ -214,7 +232,7 @@ def render_scene(data, mode):
         pcd_vis.colors = o3d.utility.Vector3dVector([])
         vis.update_geometry(pcd_vis)
 
-    # 2. Reconstructed Geometry Layer
+    # 3. Reconstructed Geometry Layer
     if mode in (1, 2):
         floor_dict = data.get("floor_mesh")
         if floor_dict and len(floor_dict["vertices"]) > 0 and len(floor_dict["triangles"]) > 0:
@@ -247,7 +265,7 @@ def render_scene(data, mode):
         floor_mesh_vis.triangles = o3d.utility.Vector3iVector([])
         vis.update_geometry(floor_mesh_vis)
 
-    # 3. Cyan Active Minecraft Chunk Wireframes
+    # 4. Cyan Active Minecraft Chunk Wireframes
     for b in data.get("active_chunks", []):
         ls = make_chunk_bounding_box(b)
         active_chunk_line_sets.append(ls)
@@ -275,8 +293,10 @@ while True:
             pcd_vis.colors = o3d.utility.Vector3dVector([])
             floor_mesh_vis.vertices = o3d.utility.Vector3dVector([])
             floor_mesh_vis.triangles = o3d.utility.Vector3iVector([])
+            robot_marker.vertices = o3d.utility.Vector3dVector([])
             vis.update_geometry(pcd_vis)
             vis.update_geometry(floor_mesh_vis)
+            vis.update_geometry(robot_marker)
             
         elif data.get("type") == "map_update":
             last_payload = data
